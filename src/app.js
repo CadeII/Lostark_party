@@ -1,284 +1,347 @@
-import { RAIDS } from "../data/raids.js";
-import { CLASS_META } from "../data/classMeta.js";
-import { CHARACTERS } from "../data/characters.js";
+import { RAIDS } from "./data/raids.js";
+import { CLASS_META } from "./data/classMeta.js";
+import { CHARACTERS } from "./data/characters.js";
 import {
-  consumeRaidGroup,
-  getKnownOwners,
-  matchNextRaid,
-  parseOwnerInput,
-  raidGroupKey,
+  autoMatchAll,
+  enrichCharacters,
+  findBestMatch,
+  getOwners,
+  getRaidFamily,
+  removeMatchedRaidFromQueue,
 } from "./matcher.js";
 
-const STORAGE_KEY = "lostark-raid-matcher.availableRaidKeys.v1";
-const HISTORY_KEY = "lostark-raid-matcher.history.v1";
-
-const elements = {
-  ownerInput: document.querySelector("#ownerInput"),
-  ownerChips: document.querySelector("#ownerChips"),
-  queue: document.querySelector("#queue"),
-  result: document.querySelector("#result"),
-  warnings: document.querySelector("#warnings"),
-  matchButton: document.querySelector("#matchButton"),
-  resetQueueButton: document.querySelector("#resetQueueButton"),
-  clearOwnersButton: document.querySelector("#clearOwnersButton"),
-  useReserve: document.querySelector("#useReserve"),
-  allowOwnerRepeat: document.querySelector("#allowOwnerRepeat"),
-  history: document.querySelector("#history"),
+const state = {
+  selectedOwners: new Set(getOwners(CHARACTERS).filter((owner) => owner !== "영수")),
+  raidQueue: [...RAIDS],
+  matched: [],
+  options: {
+    consumeRaidFamily: true,
+    enforceUniqueOwnerAcrossRaid: true,
+    allowReserveOwnerOverlap: true,
+    allowExternalEmptySlotForEightRaid: true,
+  },
 };
 
-function loadAvailableRaidKeys() {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (!stored) return RAIDS.map((raid) => raid.key);
-  try {
-    const parsed = JSON.parse(stored);
-    const raidKeys = new Set(RAIDS.map((raid) => raid.key));
-    return Array.isArray(parsed) ? parsed.filter((key) => raidKeys.has(key)) : RAIDS.map((raid) => raid.key);
-  } catch {
-    return RAIDS.map((raid) => raid.key);
+const elements = {
+  ownerList: document.querySelector("#ownerList"),
+  ownerInput: document.querySelector("#ownerInput"),
+  selectedOwnerText: document.querySelector("#selectedOwnerText"),
+  raidQueue: document.querySelector("#raidQueue"),
+  results: document.querySelector("#results"),
+  diagnostics: document.querySelector("#diagnostics"),
+  matchOneButton: document.querySelector("#matchOneButton"),
+  matchAllButton: document.querySelector("#matchAllButton"),
+  resetQueueButton: document.querySelector("#resetQueueButton"),
+  resetResultsButton: document.querySelector("#resetResultsButton"),
+  consumeRaidFamily: document.querySelector("#consumeRaidFamily"),
+  enforceUniqueOwnerAcrossRaid: document.querySelector("#enforceUniqueOwnerAcrossRaid"),
+  allowReserveOwnerOverlap: document.querySelector("#allowReserveOwnerOverlap"),
+  allowExternalEmptySlotForEightRaid: document.querySelector("#allowExternalEmptySlotForEightRaid"),
+  characterSummary: document.querySelector("#characterSummary"),
+};
+
+function updateOptionsFromUi() {
+  state.options.consumeRaidFamily = elements.consumeRaidFamily.checked;
+  state.options.enforceUniqueOwnerAcrossRaid = elements.enforceUniqueOwnerAcrossRaid.checked;
+  state.options.allowReserveOwnerOverlap = elements.allowReserveOwnerOverlap.checked;
+  state.options.allowExternalEmptySlotForEightRaid = elements.allowExternalEmptySlotForEightRaid.checked;
+}
+
+function parseOwnerInput() {
+  const inputOwners = elements.ownerInput.value
+    .split(/[,\.\n\s]+/)
+    .map((owner) => owner.trim())
+    .filter(Boolean);
+
+  if (inputOwners.length > 0) {
+    state.selectedOwners = new Set(inputOwners);
   }
 }
 
-function saveAvailableRaidKeys(keys) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
+function formatNumber(value) {
+  return new Intl.NumberFormat("ko-KR").format(Math.round(value ?? 0));
 }
 
-function loadHistory() {
-  try {
-    return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-  } catch {
-    return [];
-  }
+function roleLabel(role) {
+  return role === "SUPPORT" ? "서폿" : "딜러";
 }
 
-function saveHistory(history) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 20)));
-}
-
-let availableRaidKeys = loadAvailableRaidKeys();
-let selectedOwners = new Set(parseOwnerInput(elements.ownerInput.value));
-
-function formatNumber(value, digits = 0) {
-  return Number(value || 0).toLocaleString("ko-KR", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits,
-  });
-}
-
-function renderOwnerChips() {
-  const owners = getKnownOwners(CHARACTERS, { includeReserve: false });
-  selectedOwners = new Set(parseOwnerInput(elements.ownerInput.value));
-
-  elements.ownerChips.innerHTML = owners
+function renderOwners() {
+  const owners = getOwners(CHARACTERS);
+  elements.ownerList.innerHTML = owners
     .map((owner) => {
-      const selected = selectedOwners.has(owner);
-      return `<button type="button" class="chip ${selected ? "selected" : ""}" data-owner="${escapeHtml(owner)}">${escapeHtml(owner)}</button>`;
+      const checked = state.selectedOwners.has(owner) ? "checked" : "";
+      return `
+        <label class="chip owner-chip">
+          <input type="checkbox" value="${owner}" ${checked} />
+          <span>${owner}</span>
+        </label>
+      `;
     })
+    .join("");
+
+  elements.ownerList.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) state.selectedOwners.add(input.value);
+      else state.selectedOwners.delete(input.value);
+      renderSelectedOwnerText();
+      renderCharacterSummary();
+    });
+  });
+
+  renderSelectedOwnerText();
+}
+
+function renderSelectedOwnerText() {
+  const selected = [...state.selectedOwners];
+  elements.selectedOwnerText.textContent = selected.length > 0
+    ? `${selected.length}명 선택: ${selected.join(", ")}`
+    : "선택된 owner가 없습니다.";
+}
+
+function renderRaidQueue() {
+  if (state.raidQueue.length === 0) {
+    elements.raidQueue.innerHTML = `<div class="empty">대기열에 남은 레이드가 없습니다.</div>`;
+    return;
+  }
+
+  elements.raidQueue.innerHTML = state.raidQueue
+    .map((raid) => `
+      <article class="raid-card">
+        <div>
+          <strong>${raid.name}</strong>
+          <span class="muted">${raid.key}</span>
+        </div>
+        <div class="raid-meta">
+          <span>${raid.partySize}인</span>
+          <span>${raid.minLevel}~${raid.maxLevel === 9999 ? "∞" : raid.maxLevel}</span>
+          <span>family: ${getRaidFamily(raid.key)}</span>
+        </div>
+      </article>
+    `)
     .join("");
 }
 
-function renderQueue() {
-  const availableSet = new Set(availableRaidKeys);
-  elements.queue.innerHTML = RAIDS.map((raid) => {
-    const active = availableSet.has(raid.key);
-    return `<li class="queue-item ${active ? "active" : "done"}">
-      <div>
-        <strong>${escapeHtml(raid.name)}</strong>
-        <span class="muted">${escapeHtml(raid.key)} · ${raid.partySize}인 · Lv.${raid.minLevel}~${raid.maxLevel === 9999 ? "∞" : raid.maxLevel}</span>
-      </div>
-      <span class="badge ${active ? "" : "muted-badge"}">${active ? "대기" : "제외"}</span>
-    </li>`;
-  }).join("");
+function renderCharacterSummary() {
+  const enriched = enrichCharacters(CHARACTERS, CLASS_META);
+  const selectedOwners = state.selectedOwners;
+  const active = enriched.filter((character) => selectedOwners.has(character.owner));
+  const reserves = enriched.filter((character) => character.reserve);
+  const supports = active.filter((character) => character.role === "SUPPORT").length;
+  const dps = active.filter((character) => character.role === "DPS").length;
+  const externalSlotReady = state.options.allowExternalEmptySlotForEightRaid && selectedOwners.size === 7;
+
+  elements.characterSummary.innerHTML = `
+    <div class="metric"><strong>${active.length}</strong><span>선택 owner 보유 캐릭터</span></div>
+    <div class="metric"><strong>${dps}</strong><span>딜러</span></div>
+    <div class="metric"><strong>${supports}</strong><span>서포터</span></div>
+    <div class="metric"><strong>${reserves.length}</strong><span>reserve 후보</span></div>
+    <div class="metric"><strong>${externalSlotReady ? "ON" : "OFF"}</strong><span>8인 7명 공석 허용</span></div>
+  `;
 }
 
-function renderHistory() {
-  const history = loadHistory();
-  if (history.length === 0) {
-    elements.history.innerHTML = `<p class="muted">아직 매칭 기록이 없습니다.</p>`;
+function renderMember(member) {
+  if (member.externalSlot) {
+    return `
+      <li class="member external-slot">
+        <div class="member-main">
+          <strong>외부 구인</strong>
+          <span>${member.name}</span>
+          <span class="badge external">공백 슬롯</span>
+        </div>
+        <div class="member-sub">
+          <span>${roleLabel(member.role)}</span>
+          <span>외부에서 모집</span>
+          <span>전투력/숙련도 미정</span>
+        </div>
+        <div class="member-tags">
+          <span>시너지 미정</span>
+          <span>${member.attackType}</span>
+        </div>
+      </li>
+    `;
+  }
+
+  const reserveBadge = member.reserve ? `<span class="badge reserve">reserve</span>` : "";
+  return `
+    <li class="member ${member.role.toLowerCase()}">
+      <div class="member-main">
+        <strong>${member.owner}</strong>
+        <span>${member.name}</span>
+        ${reserveBadge}
+      </div>
+      <div class="member-sub">
+        <span>${roleLabel(member.role)}</span>
+        <span>${member.className} / ${member.build}</span>
+        <span>Lv.${member.level}</span>
+        <span>전투력 ${formatNumber(member.power)}</span>
+        <span>숙련 ${member.skill} × ${member.skillWeight}</span>
+        <strong>보정 ${formatNumber(member.effectivePower)}</strong>
+      </div>
+      <div class="member-tags">
+        ${(member.synergies ?? []).map((synergy) => `<span>${synergy}</span>`).join("")}
+        <span>${member.attackType}</span>
+      </div>
+    </li>
+  `;
+}
+
+function renderMatch(match, index) {
+  const raid = match.raid;
+  const hasExternal = (match.stats.externalSlotCount ?? 0) > 0;
+
+  return `
+    <section class="match-card">
+      <header class="match-header">
+        <div>
+          <h3>${index + 1}. ${raid.name}</h3>
+          <p>${raid.key} · ${raid.partySize}인 · Lv.${raid.minLevel}~${raid.maxLevel === 9999 ? "∞" : raid.maxLevel}</p>
+        </div>
+        <div class="score-box">
+          <strong>${formatNumber(match.stats.total)}</strong>
+          <span>${hasExternal ? "추정 보정 전투력" : "총 보정 전투력"}</span>
+          ${hasExternal ? `<small>확정 ${formatNumber(match.stats.knownTotal)} · 공석 ${match.stats.externalSlotCount}</small>` : ""}
+        </div>
+      </header>
+      <div class="party-grid">
+        ${match.parties
+          .map((party, partyIndex) => `
+            <article class="party-card">
+              <h4>파티 ${partyIndex + 1}</h4>
+              <div class="party-stats">
+                <span>${party.stats.externalSlotCount ? "추정" : "총점"} ${formatNumber(party.stats.total)}</span>
+                ${party.stats.externalSlotCount ? `<span>확정 ${formatNumber(party.stats.knownTotal)}</span>` : ""}
+                <span>평균 ${formatNumber(party.stats.average)}</span>
+                <span>편차 ${formatNumber(party.stats.spread)}</span>
+                <span>reserve ${party.stats.reserveCount}</span>
+                ${party.stats.externalSlotCount ? `<span>외부 공석 ${party.stats.externalSlotCount}</span>` : ""}
+                <span>헤드 ${party.stats.attackTypes.head} · 백 ${party.stats.attackTypes.back} · 타대 ${party.stats.attackTypes.other}</span>
+                ${party.stats.attackTypes.hasHeadBackMix ? `<span>헤드+백 우선</span>` : ""}
+              </div>
+              <ul>${party.members.map(renderMember).join("")}</ul>
+            </article>
+          `)
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderResults() {
+  if (state.matched.length === 0) {
+    elements.results.innerHTML = `<div class="empty">아직 매칭 결과가 없습니다.</div>`;
     return;
   }
 
-  elements.history.innerHTML = history.map((item) => `
-    <article class="history-item">
-      <strong>${escapeHtml(item.raidName)}</strong>
-      <span class="muted">${escapeHtml(item.createdAt)} · 제거 그룹: ${escapeHtml(item.raidGroup)}</span>
-    </article>
-  `).join("");
+  elements.results.innerHTML = state.matched.map(renderMatch).join("");
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function setWarnings(messages) {
-  elements.warnings.innerHTML = messages.length
-    ? `<ul>${messages.map((message) => `<li>${escapeHtml(message)}</li>`).join("")}</ul>`
-    : "";
-}
-
-function partyCard(party, index) {
-  const rows = party.members.map((member) => `
-    <tr>
-      <td><span class="role ${member.role === "SUPPORT" ? "support" : "dps"}">${member.role === "SUPPORT" ? "서폿" : "딜러"}</span></td>
-      <td>${escapeHtml(member.owner)}</td>
-      <td>
-        <strong>${escapeHtml(member.name)}</strong>
-        ${member.reserve ? `<span class="tag">임시</span>` : ""}
-      </td>
-      <td>${escapeHtml(member.className)} / ${escapeHtml(member.build)}</td>
-      <td>${member.level}</td>
-      <td>${formatNumber(member.effectivePower)}</td>
-      <td>${escapeHtml(member.synergies.join(", "))}</td>
-      <td>${escapeHtml(member.attackType)}</td>
-    </tr>
-  `).join("");
-
-  return `<section class="party-card">
-    <header>
-      <h3>${index}파티</h3>
-      <div class="metrics">
-        <span>합산 ${formatNumber(party.metrics.totalEffectivePower)}</span>
-        <span>평균 ${formatNumber(party.metrics.avgEffectivePower)}</span>
-        <span>편차 ${formatNumber(party.metrics.stdev)}</span>
-      </div>
-    </header>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>역할</th>
-            <th>Owner</th>
-            <th>캐릭터</th>
-            <th>직업 / 각인</th>
-            <th>레벨</th>
-            <th>보정 전투력</th>
-            <th>시너지</th>
-            <th>공격 타입</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-  </section>`;
-}
-
-function renderResult(result) {
-  if (!result.ok || !result.best) {
-    const failed = result.attempts
-      .map((attempt) => `${attempt.raid.name}: ${attempt.reason}`)
-      .slice(0, 8);
-    elements.result.innerHTML = `<article class="empty-result">
-      <h2>매칭 가능한 레이드가 없습니다.</h2>
-      <p>입력 owner, 임시 캐릭터 사용 여부, 8인 owner 중복 허용 여부를 확인해 주세요.</p>
-      ${failed.length ? `<details open><summary>실패 이유</summary><ul>${failed.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}
-    </article>`;
+function renderDiagnostics(failures = []) {
+  if (!failures.length) {
+    elements.diagnostics.innerHTML = "";
     return;
   }
 
-  const { best } = result;
-  const group = raidGroupKey(best.raid.key);
-  elements.result.innerHTML = `<article class="result-card">
-    <div class="result-header">
-      <div>
-        <p class="eyebrow">매칭 완료</p>
-        <h2>${escapeHtml(best.raid.name)}</h2>
-        <p class="muted">${escapeHtml(best.raid.key)} · ${best.raid.partySize}인 · Lv.${best.raid.minLevel}~${best.raid.maxLevel === 9999 ? "∞" : best.raid.maxLevel}</p>
-      </div>
-      <div class="score-box">
-        <strong>${formatNumber(best.metrics.totalEffectivePower)}</strong>
-        <span>전체 보정 전투력</span>
-      </div>
-    </div>
-
-    <div class="summary-grid">
-      <div><span>파티 수</span><strong>${best.parties.length}</strong></div>
-      <div><span>파티 합산 차이</span><strong>${formatNumber(best.metrics.partyTotalDiff)}</strong></div>
-      <div><span>임시 캐릭터</span><strong>${best.metrics.reserveCount}</strong></div>
-      <div><span>8인 owner 중복</span><strong>${best.metrics.duplicateOwnersAcrossRaid}</strong></div>
-    </div>
-
-    <p class="notice">매칭이 확정되어 <strong>${escapeHtml(group)}</strong> 그룹 레이드는 대기열에서 제거되었습니다.</p>
-
-    ${best.parties.map((party, index) => partyCard(party, index + 1)).join("")}
-  </article>`;
+  elements.diagnostics.innerHTML = `
+    <details open>
+      <summary>매칭 실패/제외 레이드 진단</summary>
+      <ul>
+        ${failures
+          .map((failure) => {
+            const d = failure.diagnostics;
+            return `
+              <li>
+                <strong>${failure.raid.name}</strong>: ${failure.reason}
+                <span class="muted">후보 ${d.eligibleCharacterCount}명, 딜러 ${d.eligibleDps}, 서폿 ${d.eligibleSupports}, 레벨 제외 ${d.levelFiltered}, meta 누락 ${d.missingMeta}, 공석 허용 ${d.allowExternalSlot ? "ON" : "OFF"}</span>
+              </li>
+            `;
+          })
+          .join("")}
+      </ul>
+    </details>
+  `;
 }
 
-function runMatch() {
-  const ownerNames = parseOwnerInput(elements.ownerInput.value);
-  const warnings = [];
+function render() {
+  renderSelectedOwnerText();
+  renderRaidQueue();
+  renderCharacterSummary();
+  renderResults();
+}
 
-  if (ownerNames.length < 4) {
-    warnings.push("최소 4명의 owner를 입력해야 4인 파티 조건을 검사할 수 있습니다.");
-  }
+function runMatchOne() {
+  parseOwnerInput();
+  updateOptionsFromUi();
 
-  const result = matchNextRaid({
-    ownerNames,
-    availableRaidKeys,
-    raids: RAIDS,
+  const result = findBestMatch({
+    raids: state.raidQueue,
+    selectedOwners: [...state.selectedOwners],
     characters: CHARACTERS,
     classMeta: CLASS_META,
-    includeReserves: elements.useReserve.checked,
-    allowOwnerRepeatAcrossRaid: elements.allowOwnerRepeat.checked,
+    options: state.options,
   });
 
-  if (result.unknownOwners.length > 0) {
-    warnings.push(`데이터에 없는 owner: ${result.unknownOwners.join(", ")}`);
+  if (!result.ok) {
+    renderDiagnostics(result.failures ?? []);
+    render();
+    return;
   }
 
-  setWarnings(warnings);
-  renderResult(result);
+  state.matched.push(result.match);
+  state.raidQueue = removeMatchedRaidFromQueue(state.raidQueue, result.match.raid, state.options);
+  renderDiagnostics(result.failures ?? []);
+  render();
+}
 
-  if (result.ok && result.best) {
-    availableRaidKeys = result.nextAvailableRaidKeys;
-    saveAvailableRaidKeys(availableRaidKeys);
-    const history = loadHistory();
-    history.unshift({
-      raidKey: result.best.raid.key,
-      raidName: result.best.raid.name,
-      raidGroup: raidGroupKey(result.best.raid.key),
-      createdAt: new Date().toLocaleString("ko-KR"),
-    });
-    saveHistory(history);
-    renderQueue();
-    renderHistory();
-  }
+function runMatchAll() {
+  parseOwnerInput();
+  updateOptionsFromUi();
+
+  const result = autoMatchAll({
+    raids: state.raidQueue,
+    selectedOwners: [...state.selectedOwners],
+    characters: CHARACTERS,
+    classMeta: CLASS_META,
+    options: state.options,
+  });
+
+  state.matched.push(...result.matches);
+  state.raidQueue = result.remainingRaids;
+  renderDiagnostics(result.failuresByRound.flat());
+  render();
 }
 
 function resetQueue() {
-  availableRaidKeys = RAIDS.map((raid) => raid.key);
-  saveAvailableRaidKeys(availableRaidKeys);
-  localStorage.removeItem(HISTORY_KEY);
-  renderQueue();
-  renderHistory();
-  elements.result.innerHTML = `<article class="empty-result"><h2>대기열을 초기화했습니다.</h2></article>`;
+  state.raidQueue = [...RAIDS];
+  renderDiagnostics([]);
+  render();
 }
 
-function clearOwners() {
-  elements.ownerInput.value = "";
-  renderOwnerChips();
-  setWarnings([]);
+function resetResults() {
+  state.matched = [];
+  renderDiagnostics([]);
+  render();
 }
 
-elements.ownerChips.addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-owner]");
-  if (!button) return;
-  const owner = button.dataset.owner;
-  const owners = new Set(parseOwnerInput(elements.ownerInput.value));
-  if (owners.has(owner)) owners.delete(owner);
-  else owners.add(owner);
-  elements.ownerInput.value = [...owners].join("\n");
-  renderOwnerChips();
-});
+function bindEvents() {
+  elements.matchOneButton.addEventListener("click", runMatchOne);
+  elements.matchAllButton.addEventListener("click", runMatchAll);
+  elements.resetQueueButton.addEventListener("click", resetQueue);
+  elements.resetResultsButton.addEventListener("click", resetResults);
 
-elements.ownerInput.addEventListener("input", renderOwnerChips);
-elements.matchButton.addEventListener("click", runMatch);
-elements.resetQueueButton.addEventListener("click", resetQueue);
-elements.clearOwnersButton.addEventListener("click", clearOwners);
+  [
+    elements.consumeRaidFamily,
+    elements.enforceUniqueOwnerAcrossRaid,
+    elements.allowReserveOwnerOverlap,
+    elements.allowExternalEmptySlotForEightRaid,
+  ].forEach((input) => {
+    input.addEventListener("change", () => {
+      updateOptionsFromUi();
+      renderCharacterSummary();
+    });
+  });
+}
 
-renderOwnerChips();
-renderQueue();
-renderHistory();
+renderOwners();
+bindEvents();
+render();
