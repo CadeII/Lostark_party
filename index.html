@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>로스트아크 레이드 자동 매칭</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Lost Ark Raid Matcher</p>
+          <h1>로스트아크 레이드 파티 자동 매칭</h1>
+          <p>
+            owner를 선택하거나 이름을 입력하면 레벨, 역할, 시너지, 직업 중복, 보정 전투력을 기준으로
+            4인 또는 8인 공격대를 자동으로 구성합니다. 같은 캐릭터/각인은 지평의 성당, 세르카, 종막을 각각 1회씩 갈 수 있으며,
+            파티에 배치된 레이드는 상단 잔여 현황에서 취소선으로 표시됩니다.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>1. 참여 owner 선택</h2>
+          <span id="selectedOwnerText" class="muted"></span>
+        </div>
+        <div id="ownerList" class="chip-list"></div>
+        <label class="field">
+          <span>직접 입력</span>
+          <input id="ownerInput" type="text" placeholder="예: 찬범 재진 강찬 준형 준혁 혁준 혜연" />
+          <small>입력값이 있으면 체크박스 선택보다 우선합니다. 공백, 쉼표, 줄바꿈 모두 가능.</small>
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>2. 매칭 옵션</h2>
+        </div>
+        <div class="option-grid">
+          <label class="toggle">
+            <input id="consumeRaidFamily" type="checkbox" />
+            <span>고급: 레이드 family를 전체에서 1회만 사용</span>
+          </label>
+          <label class="toggle">
+            <input id="enforceUniqueOwnerAcrossRaid" type="checkbox" checked />
+            <span>8인 공격대 전체 owner 중복 금지</span>
+          </label>
+          <label class="toggle">
+            <input id="allowReserveOwnerOverlap" type="checkbox" checked />
+            <span>reserve는 임시 인원으로 owner 중복 예외 처리</span>
+          </label>
+          <label class="toggle">
+            <input id="allowExternalEmptySlotForEightRaid" type="checkbox" checked />
+            <span>8인 레이드에서 7명 입력 시 외부 구인 1자리 허용</span>
+          </label>
+        </div>
+        <div id="characterSummary" class="metrics"></div>
+      </section>
+
+      <section class="panel character-raid-panel">
+        <div class="panel-header">
+          <div>
+            <h2>3. 캐릭터별 잔여 레이드</h2>
+            <p class="panel-description">파티에 들어간 캐릭터는 해당 레이드 계열에 취소선이 표시됩니다. 남은 항목이 아직 갈 수 있는 레이드입니다.</p>
+          </div>
+          <span class="muted">지평의 성당 · 세르카 · 종막</span>
+        </div>
+        <div id="characterRaidStatus" class="character-raid-status"></div>
+      </section>
+
+      <section class="panel actions">
+        <button id="matchOneButton" class="primary">가장 좋은 레이드 1개 매칭</button>
+        <button id="matchAllButton">남은 레이드 전체 자동 매칭</button>
+        <button id="resetQueueButton">레이드 대기열 초기화</button>
+        <button id="resetResultsButton">결과 지우기</button>
+      </section>
+
+      <section class="layout">
+        <aside class="panel">
+          <div class="panel-header">
+            <h2>레이드 대기열</h2>
+          </div>
+          <div id="raidQueue" class="raid-list"></div>
+        </aside>
+
+        <section class="panel result-panel">
+          <div class="panel-header">
+            <h2>매칭 결과</h2>
+          </div>
+          <div id="results"></div>
+          <div id="diagnostics" class="diagnostics"></div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
